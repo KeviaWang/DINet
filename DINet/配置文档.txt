@@ -1,0 +1,81 @@
+在 Google Drive 中下载资源 （asserts.zip）。解压缩并将 dir 放入 ./ 中
+
+（注意：要在该asserts文件下创建一个文件夹test_data,然后再test_data下面创建两个文件夹split_video_25fps和split_video_25fps_landmark_openface，用来存放测试集和推理数据）
+
+
+为了便于挂载获取需要提前宿主机下载好整个项目DINet
+
+拉取项目镜像：
+docker pull kevia/dinet:latest
+
+使用镜像：
+1.数据处理：
+
+ （1）从 HDTF 数据集下载视频。根据 xx_annotion_time.txt 分割视频，不裁剪和调整视频大小。
+ （2）将所有分割的视频重新采样为 25fps，并将视频放入 “./asserts/training_data/split_video_25fps”。	
+   (3)使用 openface 检测所有视频的平滑面部特征点。将所有 “.csv” 结果放入 “./asserts/training_data/split_video_25fps_landmark_openface” 中。
+	注意：（1），（2），（3）需要处理好数据加入上述对应项目文件夹下面，这里面处理了HDTF数据集，因此可以将./asserts/training_data/split_video_25fps和
+	./asserts/training_data/split_video_25fps_landmark_openface里相对应部分数据移动到./asserts/test_data/split_video_25fps和
+	./asserts/test_data/split_video_25fps_landmark_openface下面作为测试集数据
+	
+	并且完成上述可以使用预训练模型推理，如果要训练必须进行下面操作对训练数据进行处理（由于提交下面处理数据占用空间过大没法提交）
+
+   (4)从训练集视频中提取帧并将帧保存在 “./asserts/trainning_data/split_video_25fps_frame” 中。跑
+       docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  data_processing.py --extract_video_frame
+
+   (5)从训练集视频中提取音频，并将音频保存在 ./asserts/trainning_data/split_video_25fps_audio 中。跑
+       docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  data_processing.py --extract_audio
+
+ （6）从训练集音频中提取 deepspeech 特征并将特征保存在 “./asserts/trainning_data/split_video_25fps_deepspeech” 中。跑
+       docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  data_processing.py --extract_deep_speech
+
+ （7）裁剪训练集视频的人脸并将图像保存在 “./asserts/trainning_data/split_video_25fps_crop_face” 中。跑
+       docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  data_processing.py --crop_face
+
+ （8）生成训练 json 文件 “./asserts/trainning_data/training_json.json”。跑
+       docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  data_processing.py --generate_training_json
+
+2.训练过程：
+
+   我们将训练过程分为帧训练阶段和 clip 训练阶段。在帧训练阶段，我们使用从粗到细的策略，因此您可以在任意分辨率下训练模型。
+ （1）框架训练阶段。
+   在帧训练阶段，我们只使用感知损失和 GAN 损失。
+   首先，以 104x80（嘴部区域为 64x64）分辨率训练 DINet。跑   
+   docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest  train_DINet_frame.py \
+   --augment_num=32 --mouth_region_size=64 --batch_size=24 --result_path=./asserts/training_model_weight/frame_training_64
+	您可以在损失收敛时停止训练（我们在大约 270 个 epoch 中停止）。
+
+   (2)加载预训练模型（面部：104x80 & 嘴巴：64x64）并以更高分辨率训练DINet（面部：208x160 & 嘴巴：128x128）。跑
+   docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest train_DINet_frame.py \
+  --augment_num=100 --mouth_region_size=128 --batch_size=80 --coarse2fine \
+  --coarse_model_path=./asserts/training_model_weight/frame_training_64/xxxxxx.pth --result_path=./asserts/training_model_weight/frame_training_128
+	您可以在损失收敛时停止训练（我们在大约 200 个 epoch 中停止）。
+
+   (3)加载预训练模型（面部：208x160 & 嘴巴：128x128）并以更高分辨率训练DINet（面部：416x320 & 嘴巴：256x256）。跑
+    docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest train_DINet_frame.py \
+    --augment_num=20 --mouth_region_size=256 --batch_size=12 --coarse2fine \
+    --coarse_model_path=./asserts/training_model_weight/frame_training_128/xxxxxx.pth --result_path=./asserts/training_model_weight/frame_training_256
+	您可以在损失收敛时停止训练（我们在大约 200 个 epoch 中停止）。
+
+   (4)在剪辑训练阶段，我们使用感知损失、帧/剪辑 GAN 损失和同步损失。加载预训练的帧模型（面部：416x320 & 嘴巴：256x256），预训练的同步网络模型（嘴巴：256x256）并在剪辑设置中训练DINet。跑
+
+   docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest train_DINet_clip.py \
+   --augment_num=3 --mouth_region_size=256 --batch_size=3 \
+   --pretrained_syncnet_path=./asserts/syncnet_256mouth.pth --pretrained_frame_DINet_path=./asserts/training_model_weight/frame_training_256/xxxxx.pth \
+   --result_path=./asserts/training_model_weight/clip_training_256
+	您可以在损失收敛时停止训练并选择最佳模型（我们的最佳模型为 160 epoch）。
+
+3.推理评估阶段
+
+ （1）docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest run_inference.py  --process_num x
+	process_num 遍历推理个数，结果保存在./asserts/inference_result里面
+	推理阶段默认使用预训练模型，如果使用训练模型加入参数 --model_path  ./asserts/training_model_weight/clip_training_256/xxxx.pth
+	可以选择音频路径 --audio_path /path/to/your_auido
+
+   
+ （2）docker run --rm -v  path/to/your/DINet:/app --gpus all -it  --shm-size=8G -e CUDA_LAUNCH_BLOCKING=1 kevia/dinet:latest run_evaluate.py
+	评估结果保存在./asserts/evaluate_result里面。
+
+ 注意：如果像推理自己的数据：
+	和上述数据处理一样的步骤（1），（2），（3）放到./asserts/test_data文件里相应位置。
+
